@@ -150,13 +150,13 @@ def post(deal):
             {'name': '🏷️ Discount', 'value': f'**{discount}% OFF**', 'inline': True},
             {'name': '🇮🇳 Region', 'value': 'India • INR', 'inline': True},
         ],
-        'footer': {'text': 'PSN India Deals • PSPrices • Verify final price before purchase'},
+        'footer': {'text': 'PlayStation Deals  •  PSPrices  •  Verify final price before purchase'},
     }
     if cover:
         embed['thumbnail'] = {'url': cover}
     else:
         print(f'No cover URL found for: {deal["name"]}')
-    payload = {'username': 'PSN India Deals', 'embeds': [embed],
+    payload = {'username': 'PlayStation Deals', 'embeds': [embed],
                'allowed_mentions': {'parse': []}}
     for attempt in range(3):
         response = SESSION.post(WEBHOOK, json=payload, timeout=25)

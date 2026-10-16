@@ -1,4 +1,5 @@
 """PSN India discount alerts → Discord. Uses public PSPrices HTML (unofficial)."""
+import random
 import json
 import os
 import re
@@ -185,10 +186,14 @@ def main():
         raise RuntimeError('No deals parsed: PSPrices HTML, access or filters may have changed.')
     observed = {url: f'{deal["price"]}|{deal["discount"]}' for url, deal in found.items()}
     if TEST_POST:
-        # Does not modify history. Posts exactly one currently parsed listing.
-        post(next(iter(found.values())))
-        print('TEST_POST successful; history unchanged.')
-        return
+        deal = random.choice(list(found.values()))
+        post(deal)
+
+        print(
+            f'Random test deal posted: {deal["name"]}'
+        )
+        print('History unchanged.')
+    return
     previous = json.loads(STATE.read_text(encoding='utf-8')) if STATE.exists() else {}
     if not previous:
         STATE.write_text(json.dumps(observed, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')

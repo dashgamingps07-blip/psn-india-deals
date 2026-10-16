@@ -27,6 +27,7 @@ jobs:
       - name: Check PSN deals
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          TEST_POST: 'true'
         run: python bot.py
 
       - name: Save deal history

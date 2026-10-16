@@ -1,11 +1,12 @@
 
-"""PSN India discount alerts to Discord using PSPrices."""
+"""PSN India AAA game deals -> Discord."""
 
-import random
-import json
 import os
+import json
+import random
 import re
 import time
+
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
@@ -13,116 +14,233 @@ import requests
 from bs4 import BeautifulSoup
 
 
-# ---------------- CONFIGURATION ----------------
+# CONFIGURATION
 
 BASE = "https://psprices.com"
 SOURCE = BASE + "/region-in/discounts/"
 STATE = Path("seen.json")
 
 WEBHOOK = os.getenv("DISCORD_WEBHOOK_URL", "").strip()
-
-MIN_DISCOUNT = int(os.getenv("MIN_DISCOUNT", "25"))
-MAX_POSTS = int(os.getenv("MAX_POSTS", "1"))
-PAGES = max(1, min(5, int(os.getenv("PAGES", "2"))))
-
-TEST_POST = os.getenv(
-    "TEST_POST", "false"
-).lower() == "true"
+MIN_DISCOUNT = int(os.getenv("MIN_DISCOUNT", "30"))
+MAX_POSTS = max(0, int(os.getenv("MAX_POSTS", "1")))
+PAGES = max(1, min(5, int(os.getenv("PAGES", "3"))))
 
 SESSION = requests.Session()
-
 SESSION.headers.update({
     "User-Agent": (
         "Mozilla/5.0 (compatible; "
         "PSNIndiaDeals/1.1; personal deal alerts)"
     ),
-    "Accept-Language": "en-IN,en;q=0.9",
+    "Accept-Language": "en-IN,en;q=0.9"
 })
 
-IMAGE_CACHE = {}
+
+# AAA / POPULAR GAME FILTER
+
+AAA_NAMES = (
+    "god of war",
+    "spider-man",
+    "spiderman",
+    "the last of us",
+    "uncharted",
+    "ghost of tsushima",
+    "ghost of yotei",
+    "horizon",
+    "gran turismo",
+    "death stranding",
+    "days gone",
+    "bloodborne",
+    "demon's souls",
+    "demons souls",
+    "returnal",
+    "stellar blade",
+    "astro bot",
+    "ratchet",
+    "elden ring",
+    "dark souls",
+    "sekiro",
+    "armored core",
+    "cyberpunk",
+    "the witcher",
+    "red dead redemption",
+    "grand theft auto",
+    "resident evil",
+    "silent hill",
+    "final fantasy",
+    "assassin's creed",
+    "assassins creed",
+    "far cry",
+    "watch dogs",
+    "tomb raider",
+    "hitman",
+    "metal gear",
+    "devil may cry",
+    "monster hunter",
+    "dragon's dogma",
+    "dragons dogma",
+    "hogwarts legacy",
+    "star wars",
+    "batman",
+    "mortal kombat",
+    "tekken",
+    "street fighter",
+    "call of duty",
+    "battlefield",
+    "doom",
+    "elder scrolls",
+    "fallout",
+    "kingdom come",
+    "mafia",
+    "dying light",
+    "dead space",
+    "alan wake",
+    "control",
+    "borderlands",
+    "bioshock",
+    "persona",
+    "metaphor refantazio",
+    "yakuza",
+    "like a dragon",
+    "nioh",
+    "lies of p",
+    "black myth",
+    "wolverine",
+    "indiana jones",
+    "avatar: frontiers",
+    "prince of persia",
+    "dragon age",
+    "mass effect",
+    "middle-earth",
+    "need for speed",
+    "ea sports fc",
+    "wwe 2k",
+    "nba 2k",
+    "f1 20",
+    "it takes two",
+    "a plague tale",
+    "jedi survivor",
+    "jedi fallen order",
+    "forza horizon"
+)
+
+EXCLUDED = (
+    "soundtrack",
+    "season pass",
+    "battle pass",
+    "character pass",
+    "currency pack",
+    "coin pack",
+    "credit pack",
+    "virtual currency",
+    "avatar pack",
+    "costume pack",
+    "skin pack",
+    "upgrade pack",
+    "expansion pass",
+    "artbook",
+    "art book",
+    "dlc",
+    "add-on",
+    "add on",
+    "digital deluxe upgrade",
+    "bonus content",
+    "points pack",
+    "starter pack",
+    "weapon pack",
+    "cosmetic pack",
+    "sound track",
+    "virtual coin"
+)
 
 
-# ---------------- IMAGE FUNCTIONS ----------------
+def normalized(name):
+    return re.sub(
+        r"[^a-z0-9]+",
+        " ",
+        name.casefold().replace("’", "'")
+    ).strip()
 
-def absolute_image(value, page_url=BASE):
-    if not value:
+
+def is_aaa(name):
+    text = " " + normalized(name) + " "
+
+    blocked = any(
+        " " + normalized(word) + " " in text
+        for word in EXCLUDED
+    )
+
+    allowed = any(
+        " " + normalized(word) + " " in text
+        for word in AAA_NAMES
+    )
+
+    return allowed and not blocked
+
+
+def game_key(name):
+    text = normalized(name)
+
+    text = re.sub(
+        r"\b(ps4|ps5|standard edition|deluxe edition|"
+        r"ultimate edition|gold edition|complete edition|"
+        r"game of the year edition|goty edition|"
+        r"digital edition|premium edition|remastered)\b",
+        " ",
+        text
+    )
+
+    return re.sub(r"\s+", " ", text).strip()
+
+
+# IMAGE FUNCTIONS
+
+def image_url(raw, base):
+    if not raw or raw.startswith("data:"):
         return None
 
-    value = value.strip()
+    result = urljoin(base, raw.strip())
+    parsed = urlparse(result)
 
-    if value.startswith("data:"):
-        return None
+    if parsed.scheme in ("https", "http") and parsed.netloc:
+        return result
 
-    url = urljoin(page_url, value)
-    parsed = urlparse(url)
-
-    if parsed.scheme not in ("http", "https"):
-        return None
-
-    if not parsed.netloc:
-        return None
-
-    return url
+    return None
 
 
-def image_from_row(row, page_url):
+def row_image(row, base):
     for img in row.select("img"):
+        for key in (
+            "data-src",
+            "data-original",
+            "data-lazy-src",
+            "src",
+            "data-srcset",
+            "srcset"
+        ):
+            raw = img.get(key)
 
-        candidates = [
-            img.get("data-src"),
-            img.get("data-original"),
-            img.get("data-lazy-src"),
-            img.get("data-srcset"),
-            img.get("srcset"),
-            img.get("src"),
-        ]
-
-        for candidate in candidates:
-
-            if not candidate:
+            if not raw:
                 continue
 
-            if "," in candidate or re.search(
-                r"\s\d+(?:\.\d+)?[wx](?:,|$)",
-                candidate
-            ):
-                candidate = (
-                    candidate.split(",")[0]
-                    .strip()
-                    .split()[0]
-                )
+            raw = raw.split(",")[0].strip().split()[0]
+            result = image_url(raw, base)
 
-            image = absolute_image(
-                candidate,
-                page_url
-            )
-
-            if image and not any(
-                word in image.lower()
+            if result and not any(
+                word in result.lower()
                 for word in (
                     "placeholder",
                     "spacer.gif",
                     "blank.gif"
                 )
             ):
-                return image
+                return result
 
     return None
 
 
-def image_from_game_page(url):
-
-    if url in IMAGE_CACHE:
-        return IMAGE_CACHE[url]
-
-    image = None
-
+def detail_image(url):
     try:
-        response = SESSION.get(
-            url,
-            timeout=20
-        )
-
+        response = SESSION.get(url, timeout=20)
         response.raise_for_status()
 
         soup = BeautifulSoup(
@@ -130,38 +248,30 @@ def image_from_game_page(url):
             "html.parser"
         )
 
-        for selector, attribute in (
-            ('meta[property="og:image"]', "content"),
-            ('meta[name="twitter:image"]', "content"),
-            ('meta[property="twitter:image"]', "content"),
+        for selector in (
+            'meta[property="og:image"]',
+            'meta[name="twitter:image"]'
         ):
+            element = soup.select_one(selector)
 
-            tag = soup.select_one(selector)
-
-            if tag:
-                image = absolute_image(
-                    tag.get(attribute),
+            if element:
+                result = image_url(
+                    element.get("content"),
                     response.url
                 )
 
-                if image:
-                    break
+                if result:
+                    return result
 
     except requests.RequestException as error:
-        print(
-            f"Image preview unavailable "
-            f"for {url}: {error}"
-        )
+        print(f"Cover unavailable: {error}")
 
-    IMAGE_CACHE[url] = image
-
-    return image
+    return None
 
 
-# ---------------- FETCH DEALS ----------------
+# FETCH PSN INDIA DEALS
 
 def fetch(page):
-
     response = SESSION.get(
         SOURCE,
         params={
@@ -169,7 +279,7 @@ def fetch(page):
             "ordering": "desc",
             "platform": "PS5,PS4",
             "sort": "date",
-            "page": page,
+            "page": page
         },
         timeout=25
     )
@@ -181,10 +291,10 @@ def fetch(page):
         "html.parser"
     )
 
+    parsed_count = 0
     deals = []
 
     for row in soup.select("tr"):
-
         cells = row.find_all("td")
 
         if len(cells) < 3:
@@ -204,118 +314,95 @@ def fetch(page):
         if not anchor:
             continue
 
-        name = anchor.get_text(
-            " ",
-            strip=True
-        )
+        name = anchor.get_text(" ", strip=True)
 
-        if not name:
-            continue
-
-        link = urljoin(
-            BASE,
-            anchor["href"]
-        )
-
-        disc_match = re.search(
+        discount_match = re.search(
             r"[−\-]\s*(\d{1,3})\s*%",
             cells[0].get_text(" ", strip=True)
         )
 
-        price_matches = re.findall(
+        prices = re.findall(
             r"₹\s*([\d,]+(?:\.\d+)?)",
             cells[1].get_text(" ", strip=True)
         )
 
-        if not disc_match or not price_matches:
+        if not name or not discount_match or not prices:
             continue
 
-        discount = int(
-            disc_match.group(1)
-        )
+        parsed_count += 1
 
-        if discount < MIN_DISCOUNT:
+        discount = int(discount_match.group(1))
+
+        if not MIN_DISCOUNT <= discount <= 100:
             continue
 
-        if discount > 100:
+        if not is_aaa(name):
             continue
 
         current = float(
-            price_matches[0].replace(",", "")
+            prices[0].replace(",", "")
         )
 
         original = (
-            float(
-                price_matches[1].replace(",", "")
-            )
-            if len(price_matches) > 1
+            float(prices[1].replace(",", ""))
+            if len(prices) > 1
             else None
         )
 
-        if original is not None:
-            if original <= current or original <= 0:
-                original = None
+        if original is not None and original <= current:
+            original = None
 
         deals.append({
             "name": name[:160],
-            "url": link,
+            "url": urljoin(BASE, anchor["href"]),
             "discount": discount,
             "price": current,
             "original": original,
-            "image": image_from_row(
-                row,
-                response.url
-            ),
+            "image": row_image(row, response.url)
         })
 
-    return deals
+    print(
+        f"Page {page}: "
+        f"{parsed_count} parsed, "
+        f"{len(deals)} qualifying AAA deals"
+    )
+
+    return parsed_count, deals
 
 
-# ---------------- PRICE FORMAT ----------------
+# PRICE FORMAT
 
-def money(value):
+def money(amount):
     return "₹{:,.2f}".format(
-        value
+        amount
     ).removesuffix(".00")
 
 
-# ---------------- DISCORD POST ----------------
+# DISCORD MESSAGE
 
 def post(deal):
-
     cover = (
         deal.get("image")
-        or image_from_game_page(
-            deal["url"]
-        )
+        or detail_image(deal["url"])
     )
 
-    discount = deal["discount"]
-
-    current = money(
-        deal["price"]
-    )
-
-    old = (
-        money(deal["original"])
-        if deal["original"] is not None
-        else None
-    )
+    current = money(deal["price"])
+    old = deal.get("original")
 
     description = (
-        f"### 🔥 {discount}% OFF\n"
+        f"### 🔥 {deal['discount']}% OFF\n"
         f"## {current}\n"
-        + (
-            f"~~{old}~~  "
-            f"**Save "
-            f"{money(deal['original'] - deal['price'])}"
-            f"**\n"
-            if old else ""
+    )
+
+    if old is not None:
+        description += (
+            f"~~{money(old)}~~  "
+            f"**Save {money(old - deal['price'])}**\n"
         )
-        + (
-            f"\n🛒 **[VIEW GAME DEAL]"
-            f"({deal['url']})**"
-        )
+
+    description += (
+        f"\n🛒 **[VIEW GAME DEAL]"
+        f"({deal['url']})**"
     )
 
     embed = {
@@ -329,7 +416,7 @@ def post(deal):
         "fields": [
             {
                 "name": "🏷️ Discount",
-                "value": f"**{discount}% OFF**",
+                "value": f"**{deal['discount']}% OFF**",
                 "inline": True
             },
             {
@@ -346,16 +433,11 @@ def post(deal):
         }
     }
 
-    # Small cover thumbnail
+    # Original small game thumbnail
     if cover:
         embed["thumbnail"] = {
             "url": cover
         }
-    else:
-        print(
-            f"No cover URL found for: "
-            f"{deal['name']}"
-        )
 
     payload = {
         "username": "PlayStation Deals",
@@ -366,7 +448,6 @@ def post(deal):
     }
 
     for attempt in range(3):
-
         response = SESSION.post(
             WEBHOOK,
             json=payload,
@@ -374,7 +455,6 @@ def post(deal):
         )
 
         if response.status_code != 429:
-
             response.raise_for_status()
 
             print(
@@ -386,161 +466,118 @@ def post(deal):
 
         try:
             delay = float(
-                response.json().get(
-                    "retry_after", 2
-                )
+                response.json().get("retry_after", 2)
             )
-        except (ValueError, TypeError):
+        except (TypeError, ValueError):
             delay = 2
 
-        time.sleep(
-            max(1, min(30, delay))
-        )
+        time.sleep(max(1, min(30, delay)))
 
     response.raise_for_status()
 
 
-# ---------------- MAIN FUNCTION ----------------
+# NORMAL PRODUCTION MODE
 
 def main():
-
     if not WEBHOOK.startswith((
         "https://discord.com/api/webhooks/",
         "https://discordapp.com/api/webhooks/"
     )):
         raise RuntimeError(
-            "Set DISCORD_WEBHOOK_URL "
-            "in GitHub Actions secrets."
+            "Missing Discord webhook secret"
         )
 
     found = {}
+    parsed_total = 0
 
     for page in range(1, PAGES + 1):
+        count, deals = fetch(page)
+        parsed_total += count
 
-        page_deals = fetch(page)
-
-        print(
-            f"Page {page}: parsed "
-            f"{len(page_deals)} qualifying offers"
-        )
-
-        for deal in page_deals:
+        for deal in deals:
             found[deal["url"]] = deal
 
         time.sleep(1)
 
-    if not found:
+    if parsed_total == 0:
         raise RuntimeError(
-            "No deals parsed: PSPrices HTML, "
-            "access or filters may have changed."
+            "PSPrices page loaded but no deals parsed. "
+            "Parser or access may have changed."
         )
 
-    observed = {
-        url: (
-            f"{deal['price']}|"
-            f"{deal['discount']}"
-        )
-        for url, deal in found.items()
-    }
-
-    # TEST MODE: one random deal
-    if TEST_POST:
-
-        deal = random.choice(
-            list(found.values())
-        )
-
-        post(deal)
-
+    if not found:
         print(
-            f"Random test deal posted: "
-            f"{deal['name']}"
+            "No qualifying AAA deals in scanned pages. "
+            "No post."
         )
-
-        print(
-            "History unchanged."
-        )
-
         return
 
-    # NORMAL MODE
-    previous = (
+    # Load persisted history
+    history = (
         json.loads(
-            STATE.read_text(
-                encoding="utf-8"
-            )
+            STATE.read_text(encoding="utf-8")
         )
         if STATE.exists()
         else {}
     )
 
-    # First normal run: save existing deals
-    if not previous:
+    if not isinstance(history, dict):
+        raise RuntimeError(
+            "Invalid seen.json structure"
+        )
+
+    posted = set(
+        history.get("__posted_games__", [])
+    )
+
+    # Old history entries are preserved.
+    # Only confirmed posted game keys block repeats.
+    available = [
+        deal
+        for deal in found.values()
+        if game_key(deal["name"]) not in posted
+    ]
+
+    print(
+        f"Eligible AAA deals: {len(found)} | "
+        f"Unposted: {len(available)}"
+    )
+
+    if not available:
+        print(
+            "All currently scanned AAA games "
+            "already posted."
+        )
+        return
+
+    # Random unposted AAA game selection
+    selected = random.sample(
+        available,
+        min(MAX_POSTS, len(available))
+    )
+
+    for deal in selected:
+        post(deal)
+
+        # Only save after successful Discord delivery
+        posted.add(game_key(deal["name"]))
+
+        history["__posted_games__"] = sorted(posted)
 
         STATE.write_text(
             json.dumps(
-                observed,
+                history,
                 ensure_ascii=False,
                 indent=2
             ) + "\n",
             encoding="utf-8"
         )
 
-        print(
-            f"Initialized baseline of "
-            f"{len(observed)} deals; "
-            f"no alerts on first run."
-        )
-
-        return
-
-    # Find new or changed deals
-    updates = [
-        deal
-        for url, deal in found.items()
-        if previous.get(url) != observed[url]
-    ]
-
-    selected = updates[:MAX_POSTS]
-
-    for deal in selected:
-
-        post(deal)
-
-        previous[deal["url"]] = (
-            observed[deal["url"]]
-        )
-
         time.sleep(1)
 
-    # Do not mark unsent deals as delivered
-    unsent_urls = {
-        deal["url"]
-        for deal in updates[MAX_POSTS:]
-    }
-
-    for url, value in observed.items():
-
-        if (
-            url not in previous
-            and url not in unsent_urls
-        ):
-            previous[url] = value
-
-    STATE.write_text(
-        json.dumps(
-            dict(
-                list(previous.items())[-12000:]
-            ),
-            ensure_ascii=False,
-            indent=2
-        ) + "\n",
-        encoding="utf-8"
-    )
-
     print(
-        f"Found {len(found)} qualifying deals; "
-        f"sent {len(selected)} new/changed alerts."
+        f"Posted {len(selected)} "
+        f"unique AAA deal(s)"
     )
 
 

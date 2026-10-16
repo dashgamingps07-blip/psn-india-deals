@@ -224,7 +224,7 @@ def post(deal):
 
     description = (
         f'### 🔥 {discount}% OFF\n'
-        f'## 💰 {current}\n'
+        f'## ₹ {current}\n'
         + (
             f'~~{old}~~  '
             f'**Save {money(deal["original"] - deal["price"])}**\n'
@@ -243,6 +243,10 @@ def post(deal):
         'color': 0x0868D7,
         'fields': [
             {
+                'name': '🏷️ Discount',
+                'value': f'{discount}% OFF',
+                'inline': True
+            },
                 'name': '🇮🇳 Region',
                 'value': 'India • INR',
                 'inline': True

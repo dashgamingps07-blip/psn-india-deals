@@ -86,7 +86,6 @@ AAA_NAMES = (
     "batman",
     "mortal kombat",
     "tekken",
-    "street fighter",
     "call of duty",
     "battlefield",
     "doom",

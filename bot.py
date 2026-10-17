@@ -8,6 +8,7 @@ import re
 import time
 
 from pathlib import Path
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urljoin, urlparse
 
 import requests
@@ -19,6 +20,8 @@ from bs4 import BeautifulSoup
 BASE = "https://psprices.com"
 SOURCE = BASE + "/region-in/discounts/"
 STATE = Path("seen.json")
+
+COOLDOWN_DAYS = 7
 
 WEBHOOK = os.getenv("DISCORD_WEBHOOK_URL", "").strip()
 MIN_DISCOUNT = int(os.getenv("MIN_DISCOUNT", "30"))
@@ -180,11 +183,34 @@ def is_aaa(name):
 def game_key(name):
     text = normalized(name)
 
+    # Match Roman numerals and numeric versions.
+    # Different sequels remain separate games.
+    roman = {
+        "ii": "2",
+        "iii": "3",
+        "iv": "4",
+        "v": "5",
+        "vi": "6",
+        "vii": "7",
+        "viii": "8",
+        "ix": "9",
+        "x": "10"
+    }
+
+    text = " ".join(
+        roman.get(word, word)
+        for word in text.split()
+    )
+
+    # Group recognized editions of the same game.
     text = re.sub(
-        r"\b(ps4|ps5|standard edition|deluxe edition|"
-        r"ultimate edition|gold edition|complete edition|"
+        r"\b(standard edition|digital deluxe edition|"
+        r"deluxe edition|ultimate edition|gold edition|"
+        r"complete edition|champion edition|arcade edition|"
+        r"definitive edition|legendary edition|"
+        r"premium edition|special edition|"
         r"game of the year edition|goty edition|"
-        r"digital edition|premium edition|remastered)\b",
+        r"digital edition|remastered|ps4|ps5)\b",
         " ",
         text
     )
@@ -526,31 +552,83 @@ def main():
             "Invalid seen.json structure"
         )
 
-    posted = set(
-        history.get("__posted_games__", [])
-    )
+    # 7-DAY COOLDOWN SYSTEM
 
-    # Old history entries are preserved.
-    # Only confirmed posted game keys block repeats.
-    available = [
-        deal
-        for deal in found.values()
-        if game_key(deal["name"]) not in posted
-    ]
+    posted_times = history.get("__posted_times__", {})
+
+    if not isinstance(posted_times, dict):
+        posted_times = {}
+
+    now = datetime.now(timezone.utc)
+
+    # Migrate old posted games to timed history.
+    # Previous exact posting timestamps are unknown.
+    if "__posted_times__" not in history:
+        for old_key in history.get("__posted_games__", []):
+            key = game_key(old_key)
+
+            if key:
+                posted_times[key] = now.isoformat()
+
+        history["__posted_times__"] = posted_times
+
+        STATE.write_text(
+            json.dumps(
+                history,
+                ensure_ascii=False,
+                indent=2
+            ) + "\n",
+            encoding="utf-8"
+        )
+
+    # Group editions and filter games on cooldown
+    available_by_game = {}
+
+    for deal in found.values():
+        key = game_key(deal["name"])
+
+        if not key or key in available_by_game:
+            continue
+
+        last_posted = posted_times.get(key)
+
+        if last_posted:
+            try:
+                posted_at = datetime.fromisoformat(
+                    last_posted
+                )
+
+                if posted_at.tzinfo is None:
+                    posted_at = posted_at.replace(
+                        tzinfo=timezone.utc
+                    )
+
+                if now - posted_at < timedelta(
+                    days=COOLDOWN_DAYS
+                ):
+                    continue
+
+            except (TypeError, ValueError):
+                # Invalid timestamp should not block forever
+                pass
+
+        available_by_game[key] = deal
+
+    available = list(available_by_game.values())
 
     print(
         f"Eligible AAA deals: {len(found)} | "
-        f"Unposted: {len(available)}"
+        f"Outside {COOLDOWN_DAYS}-day cooldown: "
+        f"{len(available)}"
     )
 
     if not available:
         print(
-            "All currently scanned AAA games "
-            "already posted."
+            "No AAA games currently outside cooldown."
         )
         return
 
-    # Random unposted AAA game selection
+    # Random eligible game selection
     selected = random.sample(
         available,
         min(MAX_POSTS, len(available))
@@ -560,9 +638,11 @@ def main():
         post(deal)
 
         # Only save after successful Discord delivery
-        posted.add(game_key(deal["name"]))
+        posted_times[
+            game_key(deal["name"])
+        ] = datetime.now(timezone.utc).isoformat()
 
-        history["__posted_games__"] = sorted(posted)
+        history["__posted_times__"] = posted_times
 
         STATE.write_text(
             json.dumps(
@@ -576,8 +656,8 @@ def main():
         time.sleep(1)
 
     print(
-        f"Posted {len(selected)} "
-        f"unique AAA deal(s)"
+        f"Posted {len(selected)} AAA deal(s), "
+        f"each with a {COOLDOWN_DAYS}-day cooldown"
     )
 
 
